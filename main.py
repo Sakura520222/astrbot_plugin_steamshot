@@ -2,7 +2,13 @@ import subprocess
 import sys
 import os
 import time
-import winreg
+
+# 只在Windows系统上导入winreg
+if sys.platform.startswith("win"):
+    try:
+        import winreg
+    except ImportError:
+        winreg = None
 
 def install_missing_packages():
     required_packages = ["selenium", "requests", "bs4", "webdriver-manager"]
@@ -49,10 +55,33 @@ STEAM_URL_PATTERN = r"https://store\.steampowered\.com/app/(\d+)/[\w\-]+/?"
 STEAM_PROFILE_URL_PATTERN = r"https://steamcommunity\.com/(profiles/\d{17}|id/[A-Za-z0-9\-_]+)/?"
 STEAM_WORKSHOP_URL_PATTERN = r"https://steamcommunity\.com/(sharedfiles/filedetails|workshop/filedetails)/\?id=(\d+)"
 
-# **🔹 截图路径**
-STORE_SCREENSHOT_PATH = "./data/plugins/astrbot_plugin_steamshot/screenshots/store_screenshot.png"
-PROFILE_SCREENSHOT_PATH = "./data/plugins/astrbot_plugin_steamshot/screenshots/profile_screenshot.png"
-WORKSHOP_SCREENSHOT_PATH = "./data/plugins/astrbot_plugin_steamshot/screenshots/workshop_screenshot.png"
+# **🔹 截图路径** - 使用os.path确保跨平台兼容性
+# 使用绝对路径而不是相对路径，避免在不同环境中的路径问题
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_SCREENSHOT_DIR = os.path.join(BASE_DIR, "data", "plugins", "astrbot_plugin_steamshot", "screenshots")
+
+# 确保截图目录存在，并添加详细日志
+print(f"📁 创建截图目录: {BASE_SCREENSHOT_DIR}")
+os.makedirs(BASE_SCREENSHOT_DIR, exist_ok=True)
+
+# 检查目录权限
+if os.path.exists(BASE_SCREENSHOT_DIR):
+    print(f"✅ 截图目录已存在: {BASE_SCREENSHOT_DIR}")
+    # 检查写入权限
+    try:
+        test_file = os.path.join(BASE_SCREENSHOT_DIR, "test_permission.txt")
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+        print(f"✅ 截图目录有写入权限")
+    except Exception as e:
+        print(f"❌ 截图目录写入权限检查失败: {e}")
+
+STORE_SCREENSHOT_PATH = os.path.join(BASE_SCREENSHOT_DIR, "store_screenshot.png")
+PROFILE_SCREENSHOT_PATH = os.path.join(BASE_SCREENSHOT_DIR, "profile_screenshot.png")
+WORKSHOP_SCREENSHOT_PATH = os.path.join(BASE_SCREENSHOT_DIR, "workshop_screenshot.png")
+
+print(f"📝 配置的截图路径: {STORE_SCREENSHOT_PATH}")
 
 # **🔹 指定 ChromeDriver 路径**
 MANUAL_CHROMEDRIVER_PATH = r""
@@ -73,18 +102,29 @@ def get_chromedriver():
     """
     def get_browser_version():
         try:
-            if sys.platform.startswith("win"):
+            if sys.platform.startswith("win") and winreg:
                 key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\\Google\\Chrome\\BLBeacon")
                 version, _ = winreg.QueryValueEx(key, "version")
                 return version
             elif sys.platform.startswith("linux"):
-                result = subprocess.run(["google-chrome", "--version"], capture_output=True, text=True)
-                return result.stdout.strip().split()[-1]
+                # 尝试多种可能的Chrome安装路径
+                chrome_paths = ["google-chrome", "google-chrome-stable", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"]
+                for path in chrome_paths:
+                    try:
+                        result = subprocess.run([path, "--version"], capture_output=True, text=True)
+                        if result.returncode == 0:
+                            return result.stdout.strip().split()[-1]
+                    except (FileNotFoundError, PermissionError):
+                        continue
             elif sys.platform == "darwin":
-                result = subprocess.run(["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--version"], capture_output=True, text=True)
-                return result.stdout.strip().split()[-1]
-        except Exception:
-            return None
+                try:
+                    result = subprocess.run(["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--version"], capture_output=True, text=True)
+                    return result.stdout.strip().split()[-1]
+                except (FileNotFoundError, PermissionError):
+                    pass
+        except Exception as e:
+            print(f"获取浏览器版本时出错: {e}")
+        return None
 
     def extract_driver_version_from_path(path):
         try:
@@ -146,18 +186,58 @@ CHROMEDRIVER_PATH = get_chromedriver()
 def create_driver(apply_login=True, url=None):
     """ 创建 Selenium WebDriver，支持可选的Steam登录 """
     options = Options()
+    
+    # 无头模式配置
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
+    options.add_argument("--no-sandbox")  # Ubuntu环境下必须的选项
+    options.add_argument("--disable-dev-shm-usage")  # 解决Docker/无头环境下的共享内存问题
+    options.add_argument("--disable-setuid-sandbox")  # 增强兼容性
+    
+    # 渲染器兼容性选项
+    options.add_argument("--disable-features=site-per-process")  # 减少资源占用
+    options.add_argument("--window-size=1920,1080")  # 设置窗口大小
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--ignore-ssl-errors")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-usb-device-detection")
-    options.add_argument("--log-level=3")
+    options.add_argument("--disable-web-security")  # 可能有助于解决跨域问题
+    options.add_argument("--allow-running-insecure-content")
+    
+    # 性能优化选项
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-images")  # 可选：禁用图片加载以提高速度
+    options.add_argument("--disable-javascript")  # 可选：如果只需要静态内容
+    options.add_argument("--blink-settings=imagesEnabled=false")
+    
+    # 日志和调试选项
+    options.add_argument("--log-level=3")  # 设置日志级别
     options.add_argument("--silent")
+    options.add_argument("--remote-debugging-port=9222")  # 远程调试端口
+    
+    # 浏览器行为配置
+    options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")  # 模拟桌面浏览器
+    
+    # 实验性选项
     options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation", "disable-usb", "enable-devtools"])
-
+    options.add_experimental_option("prefs", {
+        "profile.default_content_settings.popups": 0,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True
+    })
+    
+    # 配置Service
     service = Service(CHROMEDRIVER_PATH)
-    service.creation_flags = 0x08000000
+    # 仅在Windows系统上设置creation_flags
+    if sys.platform.startswith("win"):
+        service.creation_flags = 0x08000000
     service.log_output = subprocess.DEVNULL
+    
+    # 添加环境变量配置
+    # 在无头环境中确保正确的DISPLAY设置
+    if sys.platform.startswith("linux") and "DISPLAY" not in os.environ:
+        # 设置默认DISPLAY为:99（Xvfb通常使用这个）
+        os.environ["DISPLAY"] = ":99"
 
     driver = webdriver.Chrome(service=service, options=options)
     
@@ -261,47 +341,182 @@ async def capture_screenshot(url, save_path):
     """ 截取网页完整截图（支持懒加载内容） """
     def run():
         driver = None
+        # 清理旧截图
+        if os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+                print(f"🗑️  已删除旧截图: {save_path}")
+            except Exception as e:
+                print(f"⚠️ 删除旧截图失败: {e}")
+        
         try:
-            # 修改：传递URL参数以应用正确的cookies
+            print(f"🔄 开始处理截图: {url}")
+            print(f"📂 目标保存路径: {save_path}")
+            
+            # 检查操作系统环境
+            is_linux = sys.platform.startswith("linux")
+            print(f"🖥️  操作系统: {'Linux' if is_linux else 'Windows'}")
+            
+            # 确保截图目录存在并检查权限
+            screenshot_dir = os.path.dirname(save_path)
+            print(f"📁 准备截图目录: {screenshot_dir}")
+            os.makedirs(screenshot_dir, exist_ok=True)
+            
+            # 权限检查
+            try:
+                test_file = os.path.join(screenshot_dir, "test_permission.txt")
+                with open(test_file, "w") as f:
+                    f.write("test")
+                os.remove(test_file)
+                print(f"✅ 截图目录写入权限验证成功")
+            except Exception as e:
+                print(f"❌ 截图目录写入权限检查失败: {e}")
+                # 在Linux上尝试修复权限
+                if is_linux:
+                    try:
+                        import subprocess
+                        subprocess.run(["chmod", "777", screenshot_dir], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        print(f"🔧 已尝试设置截图目录权限为777")
+                    except Exception as chmod_e:
+                        print(f"⚠️ 设置目录权限失败: {chmod_e}")
+            
+            # 传递URL参数以应用正确的cookies
             driver = create_driver(apply_login=True, url=url)
-            driver.set_page_load_timeout(15)
+            driver.set_page_load_timeout(30)  # 增加超时时间
 
+            # 多次尝试加载页面
             for attempt in range(3):
                 try:
+                    print(f"🔄 尝试加载页面 (尝试 {attempt + 1}/3)")
                     driver.get(url)
                     bypass_steam_age_check(driver)
+                    print("✅ 页面加载成功")
                     break
-                except Exception:
-                    print(f"⚠️ 第 {attempt + 1} 次刷新页面...")
-                    driver.refresh()
+                except Exception as inner_e:
+                    print(f"⚠️ 第 {attempt + 1} 次刷新页面... 错误: {str(inner_e)[:100]}")
+                    if driver:
+                        driver.refresh()
+                    if attempt == 2:
+                        raise Exception(f"页面加载失败，已尝试3次: {str(inner_e)}")
 
-            # 等待页面初步加载完成
-            time.sleep(2)
+            # 使用WebDriverWait等待页面加载完成
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.common.by import By
+            
+            try:
+                print("⏳ 等待关键元素加载...")
+                # 等待页面中的关键元素出现
+                WebDriverWait(driver, 20).until(
+                    lambda d: d.execute_script('return document.readyState') == 'complete'
+                )
+                print("✅ 页面DOM加载完成")
+            except Exception as e:
+                print(f"⚠️ 页面加载等待超时: {e}")
+
+            # 增加初始等待时间
+            print("⏳ 等待页面内容完全渲染...")
+            time.sleep(5)
 
             # 自动滚动以触发懒加载
             last_height = driver.execute_script("return document.body.scrollHeight")
-            while True:
+            scroll_count = 0
+            max_scrolls = 5  # 限制最大滚动次数，防止无限循环
+            print(f"📏 初始页面高度: {last_height}px")
+            
+            while scroll_count < max_scrolls:
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(2)  # 等待内容加载，可视页面内容调整
+                time.sleep(3)  # 增加等待时间以确保内容加载
                 new_height = driver.execute_script("return document.body.scrollHeight")
+                print(f"📏 滚动后页面高度: {new_height}px")
                 if new_height == last_height:
+                    print("✅ 页面已完全加载，停止滚动")
                     break
                 last_height = new_height
-
-            # 设置窗口为整页高度以便完整截图
-            driver.set_window_size(1440, last_height)
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            driver.save_screenshot(save_path)
-            print(f"✅ 截图已保存: {save_path}")
+                scroll_count += 1
+            
+            # 滚动回顶部以便从顶部开始截图
+            print("↩️  滚动回页面顶部")
+            driver.execute_script("window.scrollTo(0, 0);")
+            time.sleep(2)
+            
+            # 设置窗口大小
+            print("🖼️  设置合适的窗口大小进行截图")
+            driver.set_window_size(1920, 1080)  # 使用固定的桌面尺寸
+            
+            # 尝试多种截图方法
+            screenshot_methods = [
+                ("save_screenshot方法", lambda: driver.save_screenshot(save_path)),
+                ("PNG数据写入方法", lambda: open(save_path, 'wb').write(driver.get_screenshot_as_png()))
+            ]
+            
+            success = False
+            for method_name, screenshot_method in screenshot_methods:
+                for attempt in range(3):  # 每种方法尝试3次
+                    try:
+                        print(f"📸 使用{method_name} (尝试 {attempt+1}/3)")
+                        screenshot_method()
+                        
+                        # 验证截图
+                        if os.path.exists(save_path):
+                            file_size = os.path.getsize(save_path)
+                            print(f"📊 截图文件大小: {file_size/1024:.2f} KB")
+                            if file_size > 1024:  # 确保文件足够大
+                                print(f"✅ 截图成功: {save_path}")
+                                success = True
+                                return
+                            else:
+                                print("⚠️ 截图文件太小，可能为空截图")
+                        else:
+                            print("❌ 截图文件不存在")
+                    except Exception as e:
+                        print(f"⚠️ 截图方法执行失败: {e}")
+                    time.sleep(1)
+                
+                if success:
+                    break
+            
+            # 如果所有方法都失败，记录详细错误
+            print(f"❌ 所有截图方法都失败了")
 
         except Exception as e:
-            print(f"❌ 截图错误: {e}")
+            error_msg = str(e)
+            # 根据错误类型提供更具体的建议
+            if "session not created" in error_msg.lower() or "unable to connect to renderer" in error_msg.lower():
+                if is_linux:
+                    print(f"❌ ChromeDriver渲染器连接错误！在Linux无头环境中，可能的原因：")
+                    print(f"  1. Xvfb未启动或配置错误")
+                    print(f"  2. Chrome/ChromeDriver版本不匹配")
+                    print(f"  3. 系统资源不足")
+                    print(f"  建议：运行 'Xvfb :99 -screen 0 1400x900x24 &' 启动虚拟显示器")
+                else:
+                    print(f"❌ ChromeDriver渲染器连接错误！具体错误：{error_msg}")
+            elif "No such file or directory" in error_msg:
+                print(f"❌ 文件路径错误: {error_msg}")
+            elif "Timed out" in error_msg:
+                print(f"❌ 页面加载超时: {error_msg}")
+            else:
+                print(f"❌ 截图错误: {error_msg}")
+                
+            # 记录详细的错误信息用于调试
+            import traceback
+            print(f"📝 详细错误堆栈:\n{traceback.format_exc()[:500]}...")
 
         finally:
             if driver:
-                driver.quit()
+                try:
+                    driver.quit()
+                    print("✅ ChromeDriver已关闭")
+                except Exception as quit_e:
+                    print(f"⚠️ 关闭ChromeDriver时出错: {quit_e}")
 
+    # 执行截图操作
     await asyncio.to_thread(run)
+    
+    # 返回截图是否成功
+    success = os.path.exists(save_path) and os.path.getsize(save_path) > 1024
+    print(f"📋 截图任务完成: {'成功' if success else '失败'}")
+    return success
 
 async def get_steam_workshop_info(url):
     """ 解析 Steam 创意工坊页面信息 """
